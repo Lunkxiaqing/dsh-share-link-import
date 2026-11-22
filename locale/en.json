@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Share link import",
+    "description": "Imports the question and answer history of a public DeepSeek share link into a static session in a workspace you pick. History only: no model generation and no DeepSeek credentials."
+  }
+}

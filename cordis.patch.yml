@@ -1,0 +1,5 @@
+# dsh-share-link-import: import a public chat.deepseek.com share link into a
+# chosen workspace as a static Session (history only — nothing is generated).
+- insert:
+    - id: dsh-share-link-import
+      name: 'dsh-share-link-import'
