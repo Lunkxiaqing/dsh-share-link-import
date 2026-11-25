@@ -22,6 +22,7 @@ import { findImport, journalPath, readJournal, recordImport } from '../lib/dedup
 import { eventCountFor, writeImportedSession } from '../lib/session-writer.js'
 import { importShareLink, previewShareLink } from '../lib/importer.js'
 import { createRouteHandler } from '../lib/http.js'
+import { createPreStepNormalizer, needsSeedPromptNormalization } from '../lib/seed-prompt.js'
 
 let passed = 0
 let failed = 0
@@ -560,6 +561,72 @@ await test('routes return actionable messages, not crashes', async () => {
   assert.equal(body.ok, false)
   assert.equal(body.code, CODES.internal)
   assert.ok(body.message.length > 0)
+})
+
+// ------------------------------------------------------- imported prompt placement
+
+/**
+ * Build a stand-in session whose surface mirrors an imported log.
+ * @param {{headEmpty?: boolean, provider?: string, request?: boolean, systemHead?: boolean}} shape - the surface to build.
+ * @returns {object} the fake session.
+ */
+function fakeSession(shape = {}) {
+  const headEmpty = shape.headEmpty ?? true
+  const provider = shape.provider ?? 'deepseek-share'
+  const events = [
+    { type: 'system/message', seq: 0, data: { message: { content: headEmpty ? [] : [{ type: 'text', text: 'prompt' }] } } },
+    { type: 'user/message', seq: 1, data: {} },
+    { type: 'assistant/message', seq: 2, data: { message: { source: { kind: 'model', provider } } } },
+  ]
+  if (shape.systemHead === false) events[0] = { type: 'user/message', seq: 0, data: {} }
+  return {
+    surface: { nodes: events.map(event => event.seq) },
+    eventAt: (seq) => events.find(event => event.seq === seq),
+    requestHeader: () => (shape.request === true ? { config: { provider: 'p', model: 'm' } } : undefined),
+  }
+}
+
+await test('detects an imported session whose prompt was never placed', () => {
+  assert.equal(needsSeedPromptNormalization(fakeSession()), true)
+})
+
+await test('leaves a live session, a normalized import, and a requested session alone', () => {
+  assert.equal(needsSeedPromptNormalization(fakeSession({ systemHead: false })), false)
+  assert.equal(needsSeedPromptNormalization(fakeSession({ headEmpty: false })), false)
+  assert.equal(needsSeedPromptNormalization(fakeSession({ request: true })), false)
+  assert.equal(needsSeedPromptNormalization(undefined), false)
+  assert.equal(needsSeedPromptNormalization({ surface: { nodes: [] } }), false)
+})
+
+await test('does not claim a session seeded by another source', () => {
+  assert.equal(needsSeedPromptNormalization(fakeSession({ provider: 'deepseek-chat-export' })), false)
+})
+
+await test('starts the request series once, and only for an enter decision', async () => {
+  const sessions = new Map([['session-1', fakeSession()]])
+  const listener = createPreStepNormalizer({ get: (name) => (name === 'sessions' ? { get: (id) => sessions.get(id) } : undefined) })
+
+  const entered = await listener({ agent: { id: 'session-1' } }, async () => ({ kind: 'enter', messages: [] }))
+  assert.equal(entered.startsRequestSeries, true)
+  assert.deepEqual(entered.messages, [])
+
+  const rejected = await listener({ agent: { id: 'session-1' } }, async () => ({ kind: 'reject' }))
+  assert.deepEqual(rejected, { kind: 'reject' })
+
+  const untouched = await listener({ agent: { id: 'unknown' } }, async () => ({ kind: 'enter', messages: [] }))
+  assert.equal(untouched.startsRequestSeries, undefined)
+})
+
+await test('preserves the downstream decision when the session lookup fails', async () => {
+  const listener = createPreStepNormalizer({
+    get: () => ({
+      get: () => {
+        throw new Error('registry unavailable')
+      },
+    }),
+  })
+  const decision = await listener({ agent: { id: 'session-1' } }, async () => ({ kind: 'enter', messages: [{ id: 'm' }] }))
+  assert.deepEqual(decision, { kind: 'enter', messages: [{ id: 'm' }] })
 })
 
 await rm(home, { recursive: true, force: true })
